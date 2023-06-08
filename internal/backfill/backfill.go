@@ -154,7 +154,7 @@ func insertUncommittedFiles() {
 				log.Fatalf("failed to retrieve log entry %v", err)
 			}
 
-			err = ioutil.WriteFile("file.txt", logEntry, 0644)
+			err = ioutil.WriteFile(resultsPath, logEntry, 0644)
 			if err != nil {
 				log.Fatalf("failed to write log entry %v", err)
 			}
