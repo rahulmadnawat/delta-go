@@ -50,17 +50,18 @@ func init() {
 }
 
 func main() {
+
+	InsertUncommittedFiles()
+}
+
+func InsertUncommittedFiles() {
+	// TODO: Insert logging path
+
 	flag.Parse()
 	if len(bucketName) == 0 {
 		flag.PrintDefaults()
 		log.Fatal("invalid parameters, bucket name required")
 	}
-
-	insertUncommittedFiles()
-}
-
-func insertUncommittedFiles() {
-	// insert logging path
 
 	_, err := os.Create(resultsPath)
 	if err != nil {
@@ -111,6 +112,7 @@ func insertUncommittedFiles() {
 
 		cb := reader.ColumnBuffers
 
+		// TODO: Figure out if these min and max values are limited to a single page or the whole file
 		minValues := map[string]any{"commit_id": string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue),
 			"dbc_path":                   string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue),
 			"id":                         string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MinValue),
@@ -160,7 +162,7 @@ func insertUncommittedFiles() {
 			}
 
 			transaction.AddActions(actions)
-			// commit transaction
+			// TODO: Commit transaction (since we're not connecting to Redis, we need to be able to commit a transaction without a lock)
 		}
 	}
 }
