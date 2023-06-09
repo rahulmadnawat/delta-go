@@ -38,15 +38,18 @@ var (
 	bucketName   string
 	objectPrefix string
 	inputPath    string
+	loggingPath  string
 	resultsPath  string
-	batchSize    int = 2
+	batchSize    int
 )
 
 func init() {
 	flag.StringVar(&bucketName, "bucket", "vehicle-telemetry-fleet-prod", "The `name` of the S3 bucket to list objects from.")
 	flag.StringVar(&objectPrefix, "prefix", "tables/v1/vehicle_fleet_delta_go_clone/", "The optional `object prefix` of the S3 Object keys to list.")
 	flag.StringVar(&inputPath, "input-path", "/Users/rahulmadnawat/delta-go-logs/fleet_prod_backfill_files.txt", "The optional `input path` to read script results.")
+	flag.StringVar(&loggingPath, "logging-path", "/Users/rahulmadnawat/delta-go-logs/delta_go_overwrites.txt", "The optional `logging path` to store script logs.")
 	flag.StringVar(&resultsPath, "results-path", "/Users/rahulmadnawat/delta-go-logs/logs_test.txt", "The optional `results path` to store script results.")
+	flag.IntVar(&batchSize, "batch-size", 1000, "The optional `batch size` to incrementally process untracked files.")
 }
 
 func main() {
