@@ -38,6 +38,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.14.10 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.19.0 // indirect
 	github.com/golang/snappy v0.0.3 // indirect
+	github.com/google/go-cmp v0.5.9
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	golang.org/x/xerrors v0.0.0-20220609144429-65e65417b02f // indirect
