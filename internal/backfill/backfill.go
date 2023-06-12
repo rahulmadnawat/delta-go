@@ -256,25 +256,55 @@ func CreateLogEntries(uncommittedFiles []string) [][]byte {
 
 				cb := reader.ColumnBuffers
 
-				// TODO: Figure out if these min and max values are limited to a single page or the whole file
-				// Should we collects stats for all the columns?
-				minValues := map[string]any{"commit_id": string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue),
-					"dbc_path":                   string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue),
-					"id":                         string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MinValue),
-					"source_path":                string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MinValue),
-					"source_processed_timestamp": time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano),
-					"source_uploaded_timestamp":  time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano),
-					"sw_version":                 string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue),
-					"timestamp":                  time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)}
+				minCommitId, maxCommitId := string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue)
+				minDbcPath, maxDbcPath := string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue)
+				minId, maxId := string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MaxValue)
+				minSourcePath, maxSourcePath := string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MaxValue)
+				minSourceProcessedTimestamp, maxSourceProcessedTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
+				minSourceUploadedTimestamp, maxSourceUploadedTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
+				minSwVersion, maxSwVersion := string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue)
+				minTimestamp, maxTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
 
-				maxValues := map[string]any{"commit_id": string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue),
-					"dbc_path":                   string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue),
-					"id":                         string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MaxValue),
-					"source_path":                string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MaxValue),
-					"source_processed_timestamp": time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano),
-					"source_uploaded_timestamp":  time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano),
-					"sw_version":                 string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue),
-					"timestamp":                  time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)}
+				for {
+					if cb["Parquet_go_root\x01Tcm_commit_id"].NextRowGroup() != nil &&
+						cb["Parquet_go_root\x01Dbc_path"].NextRowGroup() != nil &&
+						cb["Parquet_go_root\x01Id"].NextRowGroup() != nil &&
+						cb["Parquet_go_root\x01Source_path"].NextRowGroup() != nil &&
+						cb["Parquet_go_root\x01Source_processed_timestamp"].NextRowGroup() != nil &&
+						cb["Parquet_go_root\x01Source_uploaded_timestamp"].NextRowGroup() != nil &&
+						cb["Parquet_go_root\x01Tcm_sw_version"].NextRowGroup() != nil &&
+						cb["Parquet_go_root\x01Timestamp"].NextRowGroup() != nil {
+						break
+					}
+
+					minCommitId, maxCommitId = min(minCommitId, string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxCommitId, string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue))
+					minDbcPath, maxDbcPath = min(minDbcPath, string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxDbcPath, string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue))
+					minId, maxId = min(minId, string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxId, string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MaxValue))
+					minSourcePath, maxSourcePath = min(minSourcePath, string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSourcePath, string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MaxValue))
+					minSourceProcessedTimestamp, maxSourceProcessedTimestamp = min(minSourceProcessedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxSourceProcessedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
+					minSourceUploadedTimestamp, maxSourceUploadedTimestamp = min(minSourceUploadedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxSourceUploadedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
+					minSwVersion, maxSwVersion = min(minSwVersion, string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSwVersion, string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue))
+					minTimestamp, maxTimestamp = min(minTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
+				}
+
+				// Should we collects stats for all the columns?
+				minValues := map[string]any{"commit_id": minCommitId,
+					"dbc_path":                   minDbcPath,
+					"id":                         minId,
+					"source_path":                minSourcePath,
+					"source_processed_timestamp": minSourceProcessedTimestamp,
+					"source_uploaded_timestamp":  minSourceUploadedTimestamp,
+					"sw_version":                 minSwVersion,
+					"timestamp":                  minTimestamp}
+
+				maxValues := map[string]any{"commit_id": maxCommitId,
+					"dbc_path":                   maxDbcPath,
+					"id":                         maxId,
+					"source_path":                maxSourcePath,
+					"source_processed_timestamp": maxSourceProcessedTimestamp,
+					"source_uploaded_timestamp":  maxSourceUploadedTimestamp,
+					"sw_version":                 maxSwVersion,
+					"timestamp":                  maxTimestamp}
 
 				stats := delta.Stats{NumRecords: reader.Footer.NumRows, TightBounds: true, MinValues: minValues, MaxValues: maxValues, NullCount: nil}
 
