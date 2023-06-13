@@ -56,13 +56,13 @@ var (
 )
 
 func init() {
-	flag.StringVar(&bucketName, "bucket", "vehicle-telemetry-fleet-prod", "The `name` of the S3 bucket to list objects from.")
-	flag.StringVar(&objectPrefix, "prefix", "tables/v1/vehicle_fleet_delta_go_clone/", "The optional `object prefix` of the S3 Object keys to list.")
-	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/fleet-prod-backfill", "The `script directory` in which to keep script files.")
+	flag.StringVar(&bucketName, "bucket", "vehicle-telemetry-rivian-dev", "The `name` of the S3 bucket to list objects from.")
+	flag.StringVar(&objectPrefix, "prefix", "tables/v1/vehicle_rivian_delta_go_clone/", "The optional `object prefix` of the S3 Object keys to list.")
+	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/rivian-dev-backfill", "The `script directory` in which to keep script files.")
 	flag.StringVar(&inputPath, "input-path", "files.txt", "The `input path` from which to read script results.")
 	flag.StringVar(&loggingPath, "logging-path", "logs.txt", "The `logging path` to which to store script logs.")
 	flag.StringVar(&resultsPath, "results-path", "log_entry.txt", "The `results path` to which to store script results.")
-	flag.IntVar(&batchSize, "batch-size", 20000, "The `batch size` used to incrementally process untracked files.")
+	flag.IntVar(&batchSize, "batch-size", 100, "The `batch size` used to incrementally process untracked files.")
 	flag.IntVar(&minBatchNum, "min-batch-number", 1, "The `minimum batch number` to commit.")
 	flag.IntVar(&maxBatchNum, "max-batch-number", math.MaxInt64, "The `maximum batch number` to commit.")
 	flag.BoolVar(&dryRun, "dry-run", true, "To avoid committing transactions, enable `dry run`.")
@@ -70,7 +70,7 @@ func init() {
 }
 
 func main() {
-	CommitLogEntries()
+	CreateLogEntries([]string{})
 }
 
 func GetPathsFromActions(actions []delta.Action) ([]string, []delta.Action) {
@@ -243,70 +243,120 @@ func CreateLogEntries(uncommittedFiles []string) [][]byte {
 				date := r.FindStringSubmatch(uncommittedFiles[batchNum*batchSize+fileNum])[1]
 				partitionValues := map[string]string{"date": date}
 
-				pr, err := parquetS3.NewS3FileReaderWithClient(context.TODO(), client, bucketName, objectPrefix+"/"+uncommittedFiles[batchNum*batchSize+fileNum])
+				pf, err := parquetS3.NewS3FileReaderWithClient(context.TODO(), client, bucketName, objectPrefix+"/"+uncommittedFiles[batchNum*batchSize+fileNum])
 				if err != nil {
 					log.WithFields(log.Fields{"file": uncommittedFiles[batchNum*batchSize+fileNum]}).Fatalf("failed to create reader %v", err)
 					continue
 				}
-				reader, err := reader.NewParquetReader(pr, nil, 1)
+				pr, err := reader.NewParquetReader(pf, nil, 1)
 				if err != nil {
 					log.WithFields(log.Fields{"file": uncommittedFiles[batchNum*batchSize+fileNum]}).Fatalf("failed to read file %v", err)
 					continue
 				}
 
-				cb := reader.ColumnBuffers
+				cb := pr.ColumnBuffers
 
-				minCommitId, maxCommitId := string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue)
-				minDbcPath, maxDbcPath := string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue)
-				minId, maxId := string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MaxValue)
-				minSourcePath, maxSourcePath := string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MaxValue)
-				minSourceProcessedTimestamp, maxSourceProcessedTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
-				minSourceUploadedTimestamp, maxSourceUploadedTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
-				minSwVersion, maxSwVersion := string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue)
-				minTimestamp, maxTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
+				hasCorruptedTimestamps := false
 
-				for {
-					if cb["Parquet_go_root\x01Tcm_commit_id"].NextRowGroup() != nil &&
-						cb["Parquet_go_root\x01Dbc_path"].NextRowGroup() != nil &&
-						cb["Parquet_go_root\x01Id"].NextRowGroup() != nil &&
-						cb["Parquet_go_root\x01Source_path"].NextRowGroup() != nil &&
-						cb["Parquet_go_root\x01Source_processed_timestamp"].NextRowGroup() != nil &&
-						cb["Parquet_go_root\x01Source_uploaded_timestamp"].NextRowGroup() != nil &&
-						cb["Parquet_go_root\x01Tcm_sw_version"].NextRowGroup() != nil &&
-						cb["Parquet_go_root\x01Timestamp"].NextRowGroup() != nil {
-						break
+				for columnName := range cb {
+					columnPrefix := strings.Split(columnName, "\x01")[0]
+
+					if columnPrefix == "Spark_schema" {
+						hasCorruptedTimestamps = true
 					}
 
-					minCommitId, maxCommitId = min(minCommitId, string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxCommitId, string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue))
-					minDbcPath, maxDbcPath = min(minDbcPath, string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxDbcPath, string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue))
-					minId, maxId = min(minId, string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxId, string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MaxValue))
-					minSourcePath, maxSourcePath = min(minSourcePath, string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSourcePath, string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MaxValue))
-					minSourceProcessedTimestamp, maxSourceProcessedTimestamp = min(minSourceProcessedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxSourceProcessedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
-					minSourceUploadedTimestamp, maxSourceUploadedTimestamp = min(minSourceUploadedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxSourceUploadedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
-					minSwVersion, maxSwVersion = min(minSwVersion, string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSwVersion, string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue))
-					minTimestamp, maxTimestamp = min(minTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
+					break
 				}
 
-				// Should we collects stats for all the columns?
-				minValues := map[string]any{"commit_id": minCommitId,
-					"dbc_path":                   minDbcPath,
-					"id":                         minId,
-					"source_path":                minSourcePath,
-					"source_processed_timestamp": minSourceProcessedTimestamp,
-					"source_uploaded_timestamp":  minSourceUploadedTimestamp,
-					"sw_version":                 minSwVersion,
-					"timestamp":                  minTimestamp}
+				var minValues map[string]any
+				var maxValues map[string]any
 
-				maxValues := map[string]any{"commit_id": maxCommitId,
-					"dbc_path":                   maxDbcPath,
-					"id":                         maxId,
-					"source_path":                maxSourcePath,
-					"source_processed_timestamp": maxSourceProcessedTimestamp,
-					"source_uploaded_timestamp":  maxSourceUploadedTimestamp,
-					"sw_version":                 maxSwVersion,
-					"timestamp":                  maxTimestamp}
+				if hasCorruptedTimestamps {
+					minCommitId, maxCommitId := string(cb["Spark_schema\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Spark_schema\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minDbcPath, maxDbcPath := string(cb["Spark_schema\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Spark_schema\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minId, maxId := string(cb["Spark_schema\x01Id"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Spark_schema\x01Id"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minSourcePath, maxSourcePath := string(cb["Spark_schema\x01Source_path"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Spark_schema\x01Source_path"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minSwVersion, maxSwVersion := string(cb["Spark_schema\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Spark_schema\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue)
 
-				stats := delta.Stats{NumRecords: reader.Footer.NumRows, TightBounds: true, MinValues: minValues, MaxValues: maxValues, NullCount: nil}
+					for {
+						if cb["Spark_schema\x01Tcm_commit_id"].NextRowGroup() != nil &&
+							cb["Spark_schema\x01Dbc_path"].NextRowGroup() != nil &&
+							cb["Spark_schema\x01Id"].NextRowGroup() != nil &&
+							cb["Spark_schema\x01Source_path"].NextRowGroup() != nil &&
+							cb["Spark_schema\x01Tcm_sw_version"].NextRowGroup() != nil {
+							break
+						}
+
+						minCommitId, maxCommitId = min(minCommitId, string(cb["Spark_schema\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxCommitId, string(cb["Spark_schema\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minDbcPath, maxDbcPath = min(minDbcPath, string(cb["Spark_schema\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxDbcPath, string(cb["Spark_schema\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minId, maxId = min(minId, string(cb["Spark_schema\x01Id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxId, string(cb["Spark_schema\x01Id"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minSourcePath, maxSourcePath = min(minSourcePath, string(cb["Spark_schema\x01Source_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSourcePath, string(cb["Spark_schema\x01Source_path"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minSwVersion, maxSwVersion = min(minSwVersion, string(cb["Spark_schema\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSwVersion, string(cb["Spark_schema\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue))
+					}
+
+					minValues = map[string]any{"commit_id": minCommitId,
+						"dbc_path":    minDbcPath,
+						"id":          minId,
+						"source_path": minSourcePath,
+						"sw_version":  minSwVersion}
+
+					maxValues = map[string]any{"commit_id": maxCommitId,
+						"dbc_path":    maxDbcPath,
+						"id":          maxId,
+						"source_path": maxSourcePath,
+						"sw_version":  maxSwVersion}
+				} else {
+					minCommitId, maxCommitId := string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minDbcPath, maxDbcPath := string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minId, maxId := string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minSourcePath, maxSourcePath := string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minSourceProcessedTimestamp, maxSourceProcessedTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
+					minSourceUploadedTimestamp, maxSourceUploadedTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
+					minSwVersion, maxSwVersion := string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minTimestamp, maxTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
+
+					for {
+						if cb["Parquet_go_root\x01Tcm_commit_id"].NextRowGroup() != nil &&
+							cb["Parquet_go_root\x01Dbc_path"].NextRowGroup() != nil &&
+							cb["Parquet_go_root\x01Id"].NextRowGroup() != nil &&
+							cb["Parquet_go_root\x01Source_path"].NextRowGroup() != nil &&
+							cb["Parquet_go_root\x01Source_processed_timestamp"].NextRowGroup() != nil &&
+							cb["Parquet_go_root\x01Source_uploaded_timestamp"].NextRowGroup() != nil &&
+							cb["Parquet_go_root\x01Tcm_sw_version"].NextRowGroup() != nil &&
+							cb["Parquet_go_root\x01Timestamp"].NextRowGroup() != nil {
+							break
+						}
+
+						minCommitId, maxCommitId = min(minCommitId, string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxCommitId, string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minDbcPath, maxDbcPath = min(minDbcPath, string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxDbcPath, string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minId, maxId = min(minId, string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxId, string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minSourcePath, maxSourcePath = min(minSourcePath, string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSourcePath, string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minSourceProcessedTimestamp, maxSourceProcessedTimestamp = min(minSourceProcessedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxSourceProcessedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
+						minSourceUploadedTimestamp, maxSourceUploadedTimestamp = min(minSourceUploadedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxSourceUploadedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
+						minSwVersion, maxSwVersion = min(minSwVersion, string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSwVersion, string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minTimestamp, maxTimestamp = min(minTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
+					}
+
+					minValues = map[string]any{"commit_id": minCommitId,
+						"dbc_path":                   minDbcPath,
+						"id":                         minId,
+						"source_path":                minSourcePath,
+						"source_processed_timestamp": minSourceProcessedTimestamp,
+						"source_uploaded_timestamp":  minSourceUploadedTimestamp,
+						"sw_version":                 minSwVersion,
+						"timestamp":                  minTimestamp}
+
+					maxValues = map[string]any{"commit_id": maxCommitId,
+						"dbc_path":                   maxDbcPath,
+						"id":                         maxId,
+						"source_path":                maxSourcePath,
+						"source_processed_timestamp": maxSourceProcessedTimestamp,
+						"source_uploaded_timestamp":  maxSourceUploadedTimestamp,
+						"sw_version":                 maxSwVersion,
+						"timestamp":                  maxTimestamp}
+				}
+
+				stats := delta.Stats{NumRecords: pr.Footer.NumRows, TightBounds: true, MinValues: minValues, MaxValues: maxValues, NullCount: nil}
 
 				uncommittedFilePreview, err := store.Head(storage.NewPath(uncommittedFiles[batchNum*batchSize+fileNum]))
 				if err != nil {
