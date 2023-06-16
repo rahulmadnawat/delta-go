@@ -59,18 +59,18 @@ func init() {
 	flag.StringVar(&bucketName, "bucket", "vehicle-telemetry-rivian-dev", "The `name` of the S3 bucket to list objects from.")
 	flag.StringVar(&objectPrefix, "prefix", "tables/v1/vehicle_rivian_delta_go_clone/", "The optional `object prefix` of the S3 Object keys to list.")
 	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/rivian-dev-backfill", "The `script directory` in which to keep script files.")
-	flag.StringVar(&inputPath, "input-path", "files.txt", "The `input path` from which to read script results.")
-	flag.StringVar(&loggingPath, "logging-path", "logs.txt", "The `logging path` to which to store script logs.")
+	flag.StringVar(&inputPath, "input-path", "files_v3.txt", "The `input path` from which to read script results.")
+	flag.StringVar(&loggingPath, "logging-path", "logs_push.txt", "The `logging path` to which to store script logs.")
 	flag.StringVar(&resultsPath, "results-path", "log_entry.txt", "The `results path` to which to store script results.")
-	flag.IntVar(&batchSize, "batch-size", 100, "The `batch size` used to incrementally process untracked files.")
+	flag.IntVar(&batchSize, "batch-size", 2, "The `batch size` used to incrementally process untracked files.")
 	flag.IntVar(&minBatchNum, "min-batch-number", 1, "The `minimum batch number` to commit.")
 	flag.IntVar(&maxBatchNum, "max-batch-number", math.MaxInt64, "The `maximum batch number` to commit.")
-	flag.BoolVar(&dryRun, "dry-run", true, "To avoid committing transactions, enable `dry run`.")
+	flag.BoolVar(&dryRun, "dry-run", false, "To avoid committing transactions, enable `dry run`.")
 	flag.BoolVar(&writeLogEntries, "write-log-entries", true, "To save log entries on disk, enable `write log entries`.")
 }
 
 func main() {
-	CreateLogEntries([]string{})
+	CommitLogEntries()
 }
 
 func GetPathsFromActions(actions []delta.Action) ([]string, []delta.Action) {
@@ -139,7 +139,7 @@ func CommitLogEntries() {
 		log.Fatalf("failed to set up S3 store %v", err)
 	}
 
-	storeState := localstate.New(-1) // the version will be pulled from the remote state, so this initialization shouldn't matter
+	storeState := localstate.New(31237)
 	lock := nillock.New()
 
 	table := delta.NewDeltaTable[FlatRecord, TestPartitionType](store, lock, storeState)
@@ -160,7 +160,7 @@ func CommitLogEntries() {
 	for batchNum := max(1, minBatchNum); batchNum <= numBatches; batchNum++ {
 		transaction = table.CreateTransaction(delta.NewDeltaTransactionOptions())
 
-		logEntry, err := os.ReadFile(strings.Replace(filepath.Join(scriptDir, resultsPath), ".", fmt.Sprintf("_%d.", batchNum+1), 1))
+		logEntry, err := os.ReadFile(strings.Replace(filepath.Join(scriptDir, resultsPath), ".", fmt.Sprintf("_%d.", batchNum), 1))
 		if err != nil {
 			log.WithFields(log.Fields{"batch number": batchNum}).Fatalf("failed to read file for entry %d of %d %v", batchNum, numBatches, err)
 		}
@@ -375,7 +375,7 @@ func CreateLogEntries(uncommittedFiles []string) [][]byte {
 
 				actions = append(actions, add)
 
-				if fileNum > 0 && fileNum%(min(batchSize, len(uncommittedFiles)-batchNum*batchSize)-1) == 0 {
+				if (fileNum > 0 && fileNum%(min(batchSize, len(uncommittedFiles)-batchNum*batchSize)-1) == 0) || len(uncommittedFiles)-batchNum*batchSize-1 == 0 {
 					logEntry, err := delta.LogEntryFromActions[FlatRecord, TestPartitionType](actions)
 					if err != nil {
 						log.WithFields(log.Fields{"file number": fileNum}).Fatalf("failed to retrieve log entry %v", err)
