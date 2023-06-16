@@ -67,7 +67,7 @@ func init() {
 	flag.StringVar(&maxDate, "max_date", "", "The optional `maximum date` for the date partitions to cover.")
 	flag.StringVar(&inputPath, "input-path", "files_v3.txt", "The optional `input path` to read script results.")
 	flag.StringVar(&loggingPath, "logging-path", "logs.txt", "The optional `logging path` to store script logs.")
-	flag.StringVar(&resultsPath, "results-path", "files_v3.txt", "The optional `results path` to store script results.")
+	flag.StringVar(&resultsPath, "results-path", "files_v4.txt", "The optional `results path` to store script results.")
 	flag.IntVar(&numVersionsToSkip, "num-versions-to-skip", 1000, "The `number of versions to skip` when aggregating the state of a table.")
 }
 
@@ -109,7 +109,7 @@ func findUncommittedFiles() {
 
 	os.MkdirAll(scriptDir, os.ModePerm)
 
-	loggingPath = "logs_find_v3.txt"
+	loggingPath = "logs_find_v4.txt"
 	f, err := os.OpenFile(filepath.Join(scriptDir, loggingPath), os.O_WRONLY|os.O_CREATE, 0755)
 	if err != nil {
 		log.Fatalf("failed creating file: %v", err)
@@ -164,8 +164,6 @@ func findUncommittedFiles() {
 		wg.Add(1)
 		go func(version int) {
 			tableNum := 1 + (version-1)/numVersionsToSkip
-
-			log.Infof(fmt.Sprint(tableNum))
 
 			tables[tableNum-1], err = delta.OpenTableWithVersion[FlatRecord, TestPartitionType](store, lock, fileState, state.DeltaDataTypeVersion(version))
 			if err != nil || tables[tableNum-1] == nil || tables[tableNum-1].State.Files == nil {
