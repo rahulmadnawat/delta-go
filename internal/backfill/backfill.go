@@ -26,6 +26,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/rivian/delta-go"
@@ -42,31 +45,33 @@ import (
 // Insert RowType and PartitionType structs here (compilation will otherwise fail)
 
 var (
-	bucketName      string
-	objectPrefix    string
-	scriptDir       string
-	inputPath       string
-	loggingPath     string
-	resultsPath     string
-	batchSize       int
-	minBatchNum     int
-	maxBatchNum     int
-	dryRun          bool
-	writeLogEntries bool
+	bucketName       string
+	objectPrefix     string
+	scriptDir        string
+	inputPath        string
+	loggingPath      string
+	resultsPath      string
+	batchSize        int
+	minBatchNum      int
+	maxBatchNum      int
+	dryRun           bool
+	writeLogEntries  bool
+	numRetryAttempts int
 )
 
 func init() {
-	flag.StringVar(&bucketName, "bucket", "vehicle-telemetry-rivian-dev", "The `name` of the S3 bucket to list objects from.")
-	flag.StringVar(&objectPrefix, "prefix", "tables/v1/vehicle_rivian_delta_go_clone/", "The optional `object prefix` of the S3 Object keys to list.")
-	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/rivian-dev-backfill", "The `script directory` in which to keep script files.")
-	flag.StringVar(&inputPath, "input-path", "files_v3.txt", "The `input path` from which to read script results.")
-	flag.StringVar(&loggingPath, "logging-path", "logs_push.txt", "The `logging path` to which to store script logs.")
+	flag.StringVar(&bucketName, "bucket", "vehicle-telemetry-fleet-prod", "The `name` of the S3 bucket to list objects from.")
+	flag.StringVar(&objectPrefix, "prefix", "tables/v1/vehicle_fleet/", "The optional `object prefix` of the S3 Object keys to list.")
+	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/fleet-prod-backfill-non-clone", "The `script directory` in which to keep script files.")
+	flag.StringVar(&inputPath, "input-path", "files.txt", "The `input path` from which to read script results.")
+	flag.StringVar(&loggingPath, "logging-path", "logs_create.txt", "The `logging path` to which to store script logs.")
 	flag.StringVar(&resultsPath, "results-path", "log_entry.txt", "The `results path` to which to store script results.")
-	flag.IntVar(&batchSize, "batch-size", 2, "The `batch size` used to incrementally process untracked files.")
+	flag.IntVar(&batchSize, "batch-size", 40000, "The `batch size` used to incrementally process untracked files.")
 	flag.IntVar(&minBatchNum, "min-batch-number", 1, "The `minimum batch number` to commit.")
 	flag.IntVar(&maxBatchNum, "max-batch-number", math.MaxInt64, "The `maximum batch number` to commit.")
-	flag.BoolVar(&dryRun, "dry-run", false, "To avoid committing transactions, enable `dry run`.")
+	flag.BoolVar(&dryRun, "dry-run", true, "To avoid committing transactions, enable `dry run`.")
 	flag.BoolVar(&writeLogEntries, "write-log-entries", true, "To save log entries on disk, enable `write log entries`.")
+	flag.IntVar(&numRetryAttempts, "num-retry-attemps", 5, "The `number of times to retry` reading a parquet file.")
 }
 
 func main() {
@@ -203,6 +208,7 @@ func CreateLogEntries(uncommittedFiles []string) [][]byte {
 
 	os.MkdirAll(scriptDir, os.ModePerm)
 
+	loggingPath = "logs_create.txt"
 	f, err := os.OpenFile(filepath.Join(scriptDir, loggingPath), os.O_WRONLY|os.O_CREATE, 0755)
 	if err != nil {
 		log.Fatalf("failed creating file: %v", err)
@@ -211,7 +217,11 @@ func CreateLogEntries(uncommittedFiles []string) [][]byte {
 
 	objectPrefix = strings.TrimSuffix(objectPrefix, "/")
 
-	cfg, err := config.LoadDefaultConfig(context.TODO())
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRetryer(func() aws.Retryer {
+		return retry.NewStandard(func(so *retry.StandardOptions) {
+			so.RateLimiter = ratelimit.NewTokenRateLimit(1000000)
+		})
+	}))
 	if err != nil {
 		log.Fatalf("failed to load SDK configuration %v", err)
 	}
@@ -231,15 +241,13 @@ func CreateLogEntries(uncommittedFiles []string) [][]byte {
 	}
 
 	numBatches := 1 + (len(uncommittedFiles)-1)/batchSize
+	actionsArray := make([][]delta.Action, numBatches)
+	logEntries := make([][]byte, numBatches)
 
-	var logEntries [][]byte
-
-	var wg = &sync.WaitGroup{}
+	wg := &sync.WaitGroup{}
 	for batchNum := 0; batchNum < numBatches; batchNum++ {
 		wg.Add(1)
 		go func(batchNum int) {
-			var actions []delta.Action
-
 			for fileNum := 0; fileNum < min(batchSize, len(uncommittedFiles)-batchNum*batchSize); fileNum++ {
 				r, _ := regexp.Compile("date=(.+?)/.+")
 				date := r.FindStringSubmatch(uncommittedFiles[batchNum*batchSize+fileNum])[1]
@@ -250,113 +258,86 @@ func CreateLogEntries(uncommittedFiles []string) [][]byte {
 					log.WithFields(log.Fields{"file": uncommittedFiles[batchNum*batchSize+fileNum]}).Fatalf("failed to create reader %v", err)
 					continue
 				}
-				pr, err := reader.NewParquetReader(pf, nil, 1)
-				if err != nil {
-					log.WithFields(log.Fields{"file": uncommittedFiles[batchNum*batchSize+fileNum]}).Fatalf("failed to read file %v", err)
-					continue
+
+				var pr *reader.ParquetReader
+
+				for retryAttemptNum := 0; retryAttemptNum < numRetryAttempts; retryAttemptNum++ {
+					if retryAttemptNum > 0 {
+						log.WithFields(log.Fields{"file": uncommittedFiles[batchNum*batchSize+fileNum]}).Infof("retry %d after failing to read file %v", retryAttemptNum, err)
+						time.Sleep(2 * time.Second)
+					}
+					pr, err = reader.NewParquetReader(pf, nil, 1)
+					if err == nil {
+						break
+					}
 				}
 
 				cb := pr.ColumnBuffers
+				newCb := map[string]*reader.ColumnBufferType{}
+				var sb strings.Builder
 
-				hasCorruptedTimestamps := false
+				for columnName, columnMetadata := range cb {
+					columnPostfix := strings.Split(columnName, "\x01")[1]
+					newCb[columnPostfix] = columnMetadata
+					sb.WriteString(columnPostfix + " ")
+				}
 
-				for columnName := range cb {
-					columnPrefix := strings.Split(columnName, "\x01")[0]
-
-					if columnPrefix == "Spark_schema" {
-						hasCorruptedTimestamps = true
-					}
-
-					break
+				if newCb["Tcm_commit_id"].DataTableNumRows == 0 {
+					log.WithFields(log.Fields{"batch number": batchNum, "file": uncommittedFiles[batchNum*batchSize+fileNum]}).Info("found empty file")
+					continue
 				}
 
 				var minValues map[string]any
 				var maxValues map[string]any
 
-				if hasCorruptedTimestamps {
-					minCommitId, maxCommitId := string(cb["Spark_schema\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Spark_schema\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue)
-					minDbcPath, maxDbcPath := string(cb["Spark_schema\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Spark_schema\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue)
-					minId, maxId := string(cb["Spark_schema\x01Id"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Spark_schema\x01Id"].ChunkHeader.MetaData.Statistics.MaxValue)
-					minSourcePath, maxSourcePath := string(cb["Spark_schema\x01Source_path"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Spark_schema\x01Source_path"].ChunkHeader.MetaData.Statistics.MaxValue)
-					minSwVersion, maxSwVersion := string(cb["Spark_schema\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Spark_schema\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue)
+				minCommitId, maxCommitId := string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue)
+				minDbcPath, maxDbcPath := string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue)
+				minId, maxId := string(newCb["Id"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Id"].ChunkHeader.MetaData.Statistics.MaxValue)
+				minSourcePath, maxSourcePath := string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MaxValue)
+				minSourceProcessedTimestamp, maxSourceProcessedTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
+				minSourceUploadedTimestamp, maxSourceUploadedTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
+				minSwVersion, maxSwVersion := string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue)
+				minTimestamp, maxTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
 
-					for {
-						if cb["Spark_schema\x01Tcm_commit_id"].NextRowGroup() != nil &&
-							cb["Spark_schema\x01Dbc_path"].NextRowGroup() != nil &&
-							cb["Spark_schema\x01Id"].NextRowGroup() != nil &&
-							cb["Spark_schema\x01Source_path"].NextRowGroup() != nil &&
-							cb["Spark_schema\x01Tcm_sw_version"].NextRowGroup() != nil {
-							break
-						}
-
-						minCommitId, maxCommitId = min(minCommitId, string(cb["Spark_schema\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxCommitId, string(cb["Spark_schema\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue))
-						minDbcPath, maxDbcPath = min(minDbcPath, string(cb["Spark_schema\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxDbcPath, string(cb["Spark_schema\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue))
-						minId, maxId = min(minId, string(cb["Spark_schema\x01Id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxId, string(cb["Spark_schema\x01Id"].ChunkHeader.MetaData.Statistics.MaxValue))
-						minSourcePath, maxSourcePath = min(minSourcePath, string(cb["Spark_schema\x01Source_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSourcePath, string(cb["Spark_schema\x01Source_path"].ChunkHeader.MetaData.Statistics.MaxValue))
-						minSwVersion, maxSwVersion = min(minSwVersion, string(cb["Spark_schema\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSwVersion, string(cb["Spark_schema\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue))
+				for {
+					if newCb["Tcm_commit_id"].NextRowGroup() != nil &&
+						newCb["Dbc_path"].NextRowGroup() != nil &&
+						newCb["Id"].NextRowGroup() != nil &&
+						newCb["Source_path"].NextRowGroup() != nil &&
+						newCb["Source_processed_timestamp"].NextRowGroup() != nil &&
+						newCb["Source_uploaded_timestamp"].NextRowGroup() != nil &&
+						newCb["Tcm_sw_version"].NextRowGroup() != nil &&
+						newCb["Timestamp"].NextRowGroup() != nil {
+						break
 					}
 
-					minValues = map[string]any{"commit_id": minCommitId,
-						"dbc_path":    minDbcPath,
-						"id":          minId,
-						"source_path": minSourcePath,
-						"sw_version":  minSwVersion}
-
-					maxValues = map[string]any{"commit_id": maxCommitId,
-						"dbc_path":    maxDbcPath,
-						"id":          maxId,
-						"source_path": maxSourcePath,
-						"sw_version":  maxSwVersion}
-				} else {
-					minCommitId, maxCommitId := string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue)
-					minDbcPath, maxDbcPath := string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue)
-					minId, maxId := string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MaxValue)
-					minSourcePath, maxSourcePath := string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MaxValue)
-					minSourceProcessedTimestamp, maxSourceProcessedTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
-					minSourceUploadedTimestamp, maxSourceUploadedTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
-					minSwVersion, maxSwVersion := string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue), string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue)
-					minTimestamp, maxTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
-
-					for {
-						if cb["Parquet_go_root\x01Tcm_commit_id"].NextRowGroup() != nil &&
-							cb["Parquet_go_root\x01Dbc_path"].NextRowGroup() != nil &&
-							cb["Parquet_go_root\x01Id"].NextRowGroup() != nil &&
-							cb["Parquet_go_root\x01Source_path"].NextRowGroup() != nil &&
-							cb["Parquet_go_root\x01Source_processed_timestamp"].NextRowGroup() != nil &&
-							cb["Parquet_go_root\x01Source_uploaded_timestamp"].NextRowGroup() != nil &&
-							cb["Parquet_go_root\x01Tcm_sw_version"].NextRowGroup() != nil &&
-							cb["Parquet_go_root\x01Timestamp"].NextRowGroup() != nil {
-							break
-						}
-
-						minCommitId, maxCommitId = min(minCommitId, string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxCommitId, string(cb["Parquet_go_root\x01Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue))
-						minDbcPath, maxDbcPath = min(minDbcPath, string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxDbcPath, string(cb["Parquet_go_root\x01Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue))
-						minId, maxId = min(minId, string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxId, string(cb["Parquet_go_root\x01Id"].ChunkHeader.MetaData.Statistics.MaxValue))
-						minSourcePath, maxSourcePath = min(minSourcePath, string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSourcePath, string(cb["Parquet_go_root\x01Source_path"].ChunkHeader.MetaData.Statistics.MaxValue))
-						minSourceProcessedTimestamp, maxSourceProcessedTimestamp = min(minSourceProcessedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxSourceProcessedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
-						minSourceUploadedTimestamp, maxSourceUploadedTimestamp = min(minSourceUploadedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxSourceUploadedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
-						minSwVersion, maxSwVersion = min(minSwVersion, string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSwVersion, string(cb["Parquet_go_root\x01Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue))
-						minTimestamp, maxTimestamp = min(minTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(cb["Parquet_go_root\x01Timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
-					}
-
-					minValues = map[string]any{"commit_id": minCommitId,
-						"dbc_path":                   minDbcPath,
-						"id":                         minId,
-						"source_path":                minSourcePath,
-						"source_processed_timestamp": minSourceProcessedTimestamp,
-						"source_uploaded_timestamp":  minSourceUploadedTimestamp,
-						"sw_version":                 minSwVersion,
-						"timestamp":                  minTimestamp}
-
-					maxValues = map[string]any{"commit_id": maxCommitId,
-						"dbc_path":                   maxDbcPath,
-						"id":                         maxId,
-						"source_path":                maxSourcePath,
-						"source_processed_timestamp": maxSourceProcessedTimestamp,
-						"source_uploaded_timestamp":  maxSourceUploadedTimestamp,
-						"sw_version":                 maxSwVersion,
-						"timestamp":                  maxTimestamp}
+					minCommitId, maxCommitId = min(minCommitId, string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxCommitId, string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue))
+					minDbcPath, maxDbcPath = min(minDbcPath, string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxDbcPath, string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue))
+					minId, maxId = min(minId, string(newCb["Id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxId, string(newCb["Id"].ChunkHeader.MetaData.Statistics.MaxValue))
+					minSourcePath, maxSourcePath = min(minSourcePath, string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSourcePath, string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MaxValue))
+					minSourceProcessedTimestamp, maxSourceProcessedTimestamp = min(minSourceProcessedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxSourceProcessedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
+					minSourceUploadedTimestamp, maxSourceUploadedTimestamp = min(minSourceUploadedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxSourceUploadedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
+					minSwVersion, maxSwVersion = min(minSwVersion, string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSwVersion, string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue))
+					minTimestamp, maxTimestamp = min(minTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
 				}
+
+				minValues = map[string]any{"tcm_commit_id": minCommitId,
+					"dbc_path":                   minDbcPath,
+					"id":                         minId,
+					"source_path":                minSourcePath,
+					"source_processed_timestamp": minSourceProcessedTimestamp,
+					"source_uploaded_timestamp":  minSourceUploadedTimestamp,
+					"tcm_sw_version":             minSwVersion,
+					"timestamp":                  minTimestamp}
+
+				maxValues = map[string]any{"tcm_commit_id": maxCommitId,
+					"dbc_path":                   maxDbcPath,
+					"id":                         maxId,
+					"source_path":                maxSourcePath,
+					"source_processed_timestamp": maxSourceProcessedTimestamp,
+					"source_uploaded_timestamp":  maxSourceUploadedTimestamp,
+					"tcm_sw_version":             maxSwVersion,
+					"timestamp":                  maxTimestamp}
 
 				stats := delta.Stats{NumRecords: pr.Footer.NumRows, TightBounds: true, MinValues: minValues, MaxValues: maxValues, NullCount: nil}
 
@@ -375,18 +356,16 @@ func CreateLogEntries(uncommittedFiles []string) [][]byte {
 					PartitionValues:  partitionValues,
 				}
 
-				actions = append(actions, add)
+				actionsArray[batchNum] = append(actionsArray[batchNum], add)
 
 				if (fileNum > 0 && fileNum%(min(batchSize, len(uncommittedFiles)-batchNum*batchSize)-1) == 0) || len(uncommittedFiles)-batchNum*batchSize-1 == 0 {
-					logEntry, err := delta.LogEntryFromActions[FlatRecord, TestPartitionType](actions)
+					logEntries[batchNum], err = delta.LogEntryFromActions[FlatRecord, TestPartitionType](actionsArray[batchNum])
 					if err != nil {
 						log.WithFields(log.Fields{"file number": fileNum}).Fatalf("failed to retrieve log entry %v", err)
 					}
 
-					logEntries = append(logEntries, logEntry)
-
 					if writeLogEntries {
-						err := os.WriteFile(strings.Replace(filepath.Join(scriptDir, resultsPath), ".", fmt.Sprintf("_%d.", batchNum+1), 1), logEntry, 0644)
+						err := os.WriteFile(strings.Replace(filepath.Join(scriptDir, resultsPath), ".", fmt.Sprintf("_%d.", batchNum+1), 1), logEntries[batchNum], 0644)
 						if err != nil {
 							log.WithFields(log.Fields{"file number": fileNum}).Fatalf("failed to write entry %d of %d to file %v", batchNum+1, numBatches, err)
 						}
@@ -395,7 +374,7 @@ func CreateLogEntries(uncommittedFiles []string) [][]byte {
 					log.WithFields(log.Fields{"file number": fileNum}).Infof("Finished batch %d of %d", batchNum+1, numBatches)
 				}
 
-				log.WithFields(log.Fields{"file": uncommittedFiles[batchNum*batchSize+fileNum]}).Infof("Processed file %d of %d in batch %d ", fileNum+1, min(batchSize, len(uncommittedFiles)-batchNum*batchSize), batchNum+1)
+				log.WithFields(log.Fields{"file": uncommittedFiles[batchNum*batchSize+fileNum]}).Infof("Processed file %d of %d in batch %d", fileNum+1, min(batchSize, len(uncommittedFiles)-batchNum*batchSize), batchNum+1)
 			}
 			wg.Done()
 		}(batchNum)
