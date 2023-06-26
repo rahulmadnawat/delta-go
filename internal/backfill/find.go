@@ -27,6 +27,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -59,9 +62,9 @@ var (
 )
 
 func init() {
-	flag.StringVar(&bucketName, "bucket", "vehicle-telemetry-fleet-prod", "The `name` of the S3 bucket to list objects from.")
-	flag.StringVar(&objectPrefix, "prefix", "tables/v1/vehicle_fleet/", "The optional `object prefix` of the S3 Object keys to list.")
-	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/fleet-prod-backfill-non-clone-v3", "The `script directory` in which to keep script files.")
+	flag.StringVar(&bucketName, "bucket", "vehicle-telemetry-rivian-prod", "The `name` of the S3 bucket to list objects from.")
+	flag.StringVar(&objectPrefix, "prefix", "tables/v1/vehicle_rivian/", "The optional `object prefix` of the S3 Object keys to list.")
+	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/rivian-prod-backfill-non-clone", "The `script directory` in which to keep script files.")
 	// TODO: The minimum and maximum dates should be automatically generated and overriden by these flags.
 	flag.StringVar(&minDate, "min_date", "", "The optional `minimum date` for the date partitions to cover.")
 	flag.StringVar(&maxDate, "max_date", "", "The optional `maximum date` for the date partitions to cover.")
@@ -111,7 +114,6 @@ func findUncommittedFiles() {
 
 	os.MkdirAll(scriptDir, os.ModePerm)
 
-	loggingPath = "logs_find.txt"
 	f, err := os.OpenFile(filepath.Join(scriptDir, loggingPath), os.O_WRONLY|os.O_CREATE, 0755)
 	if err != nil {
 		log.Fatalf("failed creating file: %v", err)
@@ -121,7 +123,11 @@ func findUncommittedFiles() {
 	commitLogPath := fmt.Sprintf("%s_delta_log/", objectPrefix)
 	objectPrefix = strings.TrimSuffix(objectPrefix, "/")
 
-	cfg, err := config.LoadDefaultConfig(context.TODO())
+	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRetryer(func() aws.Retryer {
+		return retry.NewStandard(func(so *retry.StandardOptions) {
+			so.RateLimiter = ratelimit.NewTokenRateLimit(1000000)
+		})
+	}))
 	if err != nil {
 		log.Fatalf("failed to load SDK configuration, %v", err)
 	}
@@ -157,32 +163,34 @@ func findUncommittedFiles() {
 	}
 
 	numBatches := 1 + (len(commitLogs)-1)/batchSize
-	actionsArray := make([][]delta.Action, numBatches)
 
-	mu := &sync.RWMutex{}
+	mu := sync.RWMutex{}
 	wg := &sync.WaitGroup{}
 	for batchNum := 0; batchNum < numBatches; batchNum++ {
 		wg.Add(1)
 		go func(batchNum int) {
 			for fileNum := 0; fileNum < min(batchSize, len(commitLogs)-batchNum*batchSize); fileNum++ {
-				actionsArray[batchNum], err = delta.ReadCommitLog[FlatRecord, TestPartitionType](store, storage.NewPath(strings.TrimPrefix(commitLogs[batchNum*batchSize+fileNum].Location.Raw, objectPrefix)))
+				actions, err := delta.ReadCommitLog[FlatRecord, TestPartitionType](store, storage.NewPath(strings.TrimPrefix(commitLogs[batchNum*batchSize+fileNum].Location.Raw, objectPrefix)))
 				if err != nil {
 					log.WithField("key", commitLogs[batchNum*batchSize+fileNum].Location.Raw).Errorf("failed to read commit log %v", err)
 					continue
 				}
 
-				for _, action := range actionsArray[batchNum] {
-					mu.Lock()
+				for _, action := range actions {
 					add, ok := action.(*delta.Add[FlatRecord, TestPartitionType])
 					if ok {
+						mu.Lock()
 						committedParquetFiles = append(committedParquetFiles, add.Path)
+						mu.Unlock()
+						continue
 					}
 
 					remove, ok := action.(*delta.Remove)
 					if ok {
+						mu.Lock()
 						committedParquetFiles = append(committedParquetFiles, remove.Path)
+						mu.Unlock()
 					}
-					mu.Unlock()
 				}
 
 				log.WithFields(log.Fields{"file": commitLogs[batchNum*batchSize+fileNum].Location.Raw}).Infof("Processed file %d of %d in batch %d", fileNum+1, min(batchSize, len(commitLogs)-batchNum*batchSize), batchNum+1)
@@ -206,7 +214,7 @@ func findUncommittedFiles() {
 		committedParquetFilesByDate[date] = append(committedParquetFilesByDate[date], key)
 	}
 
-	dates := make([]string, len(committedParquetFilesByDate))
+	var dates []string
 
 	for date := range committedParquetFilesByDate {
 		dates = append(dates, date)
@@ -216,7 +224,7 @@ func findUncommittedFiles() {
 
 	fmt.Println("Distribution of committed parquet files by date:")
 	for _, date := range dates {
-		fmt.Println(date, ": ", len(committedParquetFilesByDate[date]))
+		fmt.Println(date, ":", len(committedParquetFilesByDate[date]))
 	}
 	fmt.Println()
 
@@ -290,27 +298,25 @@ func findUncommittedFiles() {
 	log.Infof("Last commit timestamp: %s", lastCommitTimestamp.String())
 
 	listResults.Objects = nil
-	datePartitionFilesArray := make([]storage.ListResult, len(datePartitions))
 
-	mu2 := &sync.RWMutex{}
-	wg2 := &sync.WaitGroup{}
+	wg = &sync.WaitGroup{}
 	for datePartitionNum := range datePartitions {
-		wg2.Add(1)
+		wg.Add(1)
 		go func(datePartitionNum int) {
-			datePartitionFilesArray[datePartitionNum], _, err = ListAll(client, path, storage.NewPath(fmt.Sprintf("%s/date=%s/", objectPrefix, datePartitions[datePartitionNum])), "")
+			datePartitionFiles, _, err := ListAll(client, path, storage.NewPath(fmt.Sprintf("%s/date=%s/", objectPrefix, datePartitions[datePartitionNum])), "")
 			if err != nil {
 				log.Fatalf("failed to list all %s partition files %v", datePartitions[datePartitionNum], err)
 			}
 
-			mu2.Lock()
-			listResults.Objects = append(listResults.Objects, datePartitionFilesArray[datePartitionNum].Objects...)
-			mu2.Unlock()
+			mu.Lock()
+			listResults.Objects = append(listResults.Objects, datePartitionFiles.Objects...)
+			mu.Unlock()
 
 			log.WithFields(log.Fields{"date partition": datePartitions[datePartitionNum]}).Infof("Processed date partition %d of %d", datePartitionNum+1, len(datePartitions))
-			wg2.Done()
+			wg.Done()
 		}(datePartitionNum)
 	}
-	wg2.Wait()
+	wg.Wait()
 
 	var allParquetFiles []string
 
@@ -332,7 +338,7 @@ func findUncommittedFiles() {
 		allParquetFilesByDate[date] = append(allParquetFilesByDate[date], key)
 	}
 
-	dates = make([]string, len(allParquetFilesByDate))
+	dates = []string{}
 
 	for date := range allParquetFilesByDate {
 		dates = append(dates, date)
@@ -342,7 +348,7 @@ func findUncommittedFiles() {
 
 	fmt.Println("Distribution of parquet files within specified date range by date:")
 	for _, date := range dates {
-		fmt.Println(date, ": ", len(allParquetFilesByDate[date]))
+		fmt.Println(date, ":", len(allParquetFilesByDate[date]))
 	}
 	fmt.Println()
 
