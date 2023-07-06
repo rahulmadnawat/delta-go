@@ -42,8 +42,6 @@ import (
 	"golang.org/x/exp/constraints"
 )
 
-// Insert RowType and PartitionType structs here (compilation will otherwise fail)
-
 var (
 	bucketName       string
 	objectPrefix     string
@@ -60,16 +58,16 @@ var (
 )
 
 func init() {
-	flag.StringVar(&bucketName, "bucket", "vehicle-telemetry-fleet-prod", "The `name` of the S3 bucket to list objects from.")
-	flag.StringVar(&objectPrefix, "prefix", "tables/v1/vehicle_fleet/", "The optional `object prefix` of the S3 Object keys to list.")
-	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/fleet-prod-backfill-non-clone", "The `script directory` in which to keep script files.")
+	flag.StringVar(&bucketName, "bucket", "vehicle-telemetry-rivian-prod", "The `name` of the S3 bucket to list objects from.")
+	flag.StringVar(&objectPrefix, "prefix", "tables/v1/vehicle_rivian/", "The optional `object prefix` of the S3 Object keys to list.")
+	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/rivian-prod-backfill-non-clone", "The `script directory` in which to keep script files.")
 	flag.StringVar(&inputPath, "input-path", "files.txt", "The `input path` from which to read script results.")
-	flag.StringVar(&loggingPath, "logging-path", "logs_create.txt", "The `logging path` to which to store script logs.")
+	flag.StringVar(&loggingPath, "logging-path", "logs_commit.txt", "The `logging path` to which to store script logs.")
 	flag.StringVar(&resultsPath, "results-path", "log_entry.txt", "The `results path` to which to store script results.")
-	flag.IntVar(&batchSize, "batch-size", 40000, "The `batch size` used to incrementally process untracked files.")
-	flag.IntVar(&minBatchNum, "min-batch-number", 1, "The `minimum batch number` to commit.")
+	flag.IntVar(&batchSize, "batch-size", 2000, "The `batch size` used to incrementally process untracked files.")
+	flag.IntVar(&minBatchNum, "min-batch-number", 6, "The `minimum batch number` to commit.")
 	flag.IntVar(&maxBatchNum, "max-batch-number", math.MaxInt64, "The `maximum batch number` to commit.")
-	flag.BoolVar(&dryRun, "dry-run", true, "To avoid committing transactions, enable `dry run`.")
+	flag.BoolVar(&dryRun, "dry-run", false, "To avoid committing transactions, enable `dry run`.")
 	flag.BoolVar(&writeLogEntries, "write-log-entries", true, "To save log entries on disk, enable `write log entries`.")
 	flag.IntVar(&numRetryAttempts, "num-retry-attemps", 5, "The `number of times to retry` reading a parquet file.")
 }
@@ -123,7 +121,6 @@ func CommitLogEntries() {
 		log.Fatal("invalid parameters, bucket name required")
 	}
 
-	loggingPath = "logs_commit.txt"
 	f, err := os.OpenFile(filepath.Join(scriptDir, loggingPath), os.O_WRONLY|os.O_CREATE, 0755)
 	if err != nil {
 		log.Fatalf("failed creating file: %v", err)
@@ -144,7 +141,7 @@ func CommitLogEntries() {
 		log.Fatalf("failed to set up S3 store %v", err)
 	}
 
-	storeState := localstate.New(31237)
+	storeState := localstate.New(197032)
 	lock := nillock.New()
 
 	table := delta.NewDeltaTable[FlatRecord, TestPartitionType](store, lock, storeState)
