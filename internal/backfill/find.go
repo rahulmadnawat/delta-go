@@ -64,7 +64,7 @@ var (
 func init() {
 	flag.StringVar(&bucketName, "bucket", "vehicle-telemetry-rivian-prod", "The `name` of the S3 bucket to list objects from.")
 	flag.StringVar(&objectPrefix, "prefix", "tables/v1/vehicle_rivian/", "The optional `object prefix` of the S3 Object keys to list.")
-	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/rivian-prod-backfill-non-clone", "The `script directory` in which to keep script files.")
+	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/rivian-prod-backfill-non-clone-v2", "The `script directory` in which to keep script files.")
 	// TODO: The minimum and maximum dates should be automatically generated and overriden by these flags.
 	flag.StringVar(&minDate, "min_date", "", "The optional `minimum date` for the date partitions to cover.")
 	flag.StringVar(&maxDate, "max_date", "", "The optional `maximum date` for the date partitions to cover.")

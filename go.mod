@@ -15,12 +15,12 @@ require (
 	github.com/segmentio/parquet-go v0.0.0-20230427215636-d483faba23a5
 	github.com/sirupsen/logrus v1.9.0
 	github.com/stvp/tempredis v0.0.0-20181119212430-b82af8480203
-	github.com/xitongsys/parquet-go v1.6.2
 	golang.org/x/exp v0.0.0-20230224173230-c95f2b4c22f2
 )
 
+require gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
+
 require (
-	github.com/apache/arrow/go/arrow v0.0.0-20200730104253-651201b0f516 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.4.10 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.13.24 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.13.3 // indirect
@@ -35,8 +35,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.12.10 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.14.10 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.19.0 // indirect
-	github.com/golang/snappy v0.0.3 // indirect
-	github.com/google/go-cmp v0.5.9
+	github.com/google/go-cmp v0.5.9 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	golang.org/x/xerrors v0.0.0-20220609144429-65e65417b02f // indirect
@@ -61,7 +60,6 @@ require (
 	github.com/olekukonko/tablewriter v0.0.5 // indirect
 	github.com/pierrec/lz4/v4 v4.1.15 // indirect
 	github.com/segmentio/encoding v0.3.5 // indirect
-	github.com/xitongsys/parquet-go-source v0.0.0-20230523235104-6044ab53696e
 	golang.org/x/sys v0.5.0 // indirect
 )
 
