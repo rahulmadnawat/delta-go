@@ -186,7 +186,7 @@ func CommitLogEntries() {
 			log.WithFields(log.Fields{"batch number": batchNum}).Infof("Committed version %d", version)
 		}
 
-		time.Sleep(5 * time.Second)
+		//time.Sleep(5 * time.Second)
 	}
 }
 
