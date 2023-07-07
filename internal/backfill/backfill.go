@@ -42,6 +42,8 @@ import (
 	"golang.org/x/exp/constraints"
 )
 
+// Insert RowType and PartitionType structs here (compilation will otherwise fail)
+
 var (
 	bucketName       string
 	objectPrefix     string
@@ -58,10 +60,10 @@ var (
 )
 
 func init() {
-	flag.StringVar(&bucketName, "bucket", "vehicle-telemetry-rivian-prod", "The `name` of the S3 bucket to list objects from.")
+	flag.StringVar(&bucketName, "bucket", "vehicle-telemetry-rivian-dev", "The `name` of the S3 bucket to list objects from.")
 	flag.StringVar(&objectPrefix, "prefix", "tables/v1/vehicle_rivian/", "The optional `object prefix` of the S3 Object keys to list.")
-	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/rivian-prod-backfill-non-clone-v2", "The `script directory` in which to keep script files.")
-	flag.StringVar(&inputPath, "input-path", "files.txt", "The `input path` from which to read script results.")
+	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/rivian-dev-full-backfill-non-clone", "The `script directory` in which to keep script files.")
+	flag.StringVar(&inputPath, "input-path", "files_correct_schema.txt", "The `input path` from which to read script results.")
 	flag.StringVar(&loggingPath, "logging-path", "logs_commit.txt", "The `logging path` to which to store script logs.")
 	flag.StringVar(&resultsPath, "results-path", "log_entry.txt", "The `results path` to which to store script results.")
 	flag.IntVar(&batchSize, "batch-size", 1000, "The `batch size` used to incrementally process untracked files.")
@@ -142,7 +144,7 @@ func CommitLogEntries() {
 		log.Fatalf("failed to set up S3 store %v", err)
 	}
 
-	storeState := localstate.New(197824)
+	storeState := localstate.New(0)
 	lock := nillock.New()
 
 	table := delta.NewDeltaTable[FlatRecord, TestPartitionType](store, lock, storeState)
