@@ -60,12 +60,12 @@ var (
 func init() {
 	flag.StringVar(&bucketName, "bucket", "vehicle-telemetry-rivian-prod", "The `name` of the S3 bucket to list objects from.")
 	flag.StringVar(&objectPrefix, "prefix", "tables/v1/vehicle_rivian/", "The optional `object prefix` of the S3 Object keys to list.")
-	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/rivian-prod-backfill-non-clone", "The `script directory` in which to keep script files.")
+	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/rivian-prod-backfill-non-clone-v2", "The `script directory` in which to keep script files.")
 	flag.StringVar(&inputPath, "input-path", "files.txt", "The `input path` from which to read script results.")
 	flag.StringVar(&loggingPath, "logging-path", "logs_commit.txt", "The `logging path` to which to store script logs.")
 	flag.StringVar(&resultsPath, "results-path", "log_entry.txt", "The `results path` to which to store script results.")
-	flag.IntVar(&batchSize, "batch-size", 2000, "The `batch size` used to incrementally process untracked files.")
-	flag.IntVar(&minBatchNum, "min-batch-number", 6, "The `minimum batch number` to commit.")
+	flag.IntVar(&batchSize, "batch-size", 1000, "The `batch size` used to incrementally process untracked files.")
+	flag.IntVar(&minBatchNum, "min-batch-number", 1, "The `minimum batch number` to commit.")
 	flag.IntVar(&maxBatchNum, "max-batch-number", math.MaxInt64, "The `maximum batch number` to commit.")
 	flag.BoolVar(&dryRun, "dry-run", false, "To avoid committing transactions, enable `dry run`.")
 	flag.BoolVar(&writeLogEntries, "write-log-entries", true, "To save log entries on disk, enable `write log entries`.")
@@ -73,6 +73,7 @@ func init() {
 }
 
 func main() {
+	//CreateLogEntries([]string{})
 	CommitLogEntries()
 }
 
@@ -141,7 +142,7 @@ func CommitLogEntries() {
 		log.Fatalf("failed to set up S3 store %v", err)
 	}
 
-	storeState := localstate.New(197032)
+	storeState := localstate.New(197824)
 	lock := nillock.New()
 
 	table := delta.NewDeltaTable[FlatRecord, TestPartitionType](store, lock, storeState)
@@ -205,7 +206,6 @@ func CreateLogEntries(uncommittedFiles []string) [][]byte {
 
 	os.MkdirAll(scriptDir, os.ModePerm)
 
-	loggingPath = "logs_create.txt"
 	f, err := os.OpenFile(filepath.Join(scriptDir, loggingPath), os.O_WRONLY|os.O_CREATE, 0755)
 	if err != nil {
 		log.Fatalf("failed creating file: %v", err)
@@ -281,6 +281,23 @@ func CreateLogEntries(uncommittedFiles []string) [][]byte {
 
 				if newCb["Tcm_commit_id"].DataTableNumRows == 0 {
 					log.WithFields(log.Fields{"batch number": batchNum, "file": uncommittedFiles[batchNum*batchSize+fileNum]}).Info("found empty file")
+
+					if (fileNum > 0 && fileNum%(min(batchSize, len(uncommittedFiles)-batchNum*batchSize)-1) == 0) || len(uncommittedFiles)-batchNum*batchSize-1 == 0 || len(uncommittedFiles)-fileNum+1 == 0 {
+						logEntries[batchNum], err = delta.LogEntryFromActions[FlatRecord, TestPartitionType](actionsArray[batchNum])
+						if err != nil {
+							log.WithFields(log.Fields{"file number": fileNum}).Fatalf("failed to retrieve log entry %v", err)
+						}
+
+						if writeLogEntries {
+							err := os.WriteFile(strings.Replace(filepath.Join(scriptDir, resultsPath), ".", fmt.Sprintf("_%d.", batchNum+1), 1), logEntries[batchNum], 0644)
+							if err != nil {
+								log.WithFields(log.Fields{"file number": fileNum}).Fatalf("failed to write entry %d of %d to file %v", batchNum+1, numBatches, err)
+							}
+						}
+
+						log.WithFields(log.Fields{"file number": fileNum}).Infof("Finished batch %d of %d", batchNum+1, numBatches)
+					}
+
 					continue
 				}
 
@@ -355,7 +372,7 @@ func CreateLogEntries(uncommittedFiles []string) [][]byte {
 
 				actionsArray[batchNum] = append(actionsArray[batchNum], add)
 
-				if (fileNum > 0 && fileNum%(min(batchSize, len(uncommittedFiles)-batchNum*batchSize)-1) == 0) || len(uncommittedFiles)-batchNum*batchSize-1 == 0 {
+				if (fileNum > 0 && fileNum%(min(batchSize, len(uncommittedFiles)-batchNum*batchSize)-1) == 0) || len(uncommittedFiles)-batchNum*batchSize-1 == 0 || len(uncommittedFiles)-fileNum+1 == 0 {
 					logEntries[batchNum], err = delta.LogEntryFromActions[FlatRecord, TestPartitionType](actionsArray[batchNum])
 					if err != nil {
 						log.WithFields(log.Fields{"file number": fileNum}).Fatalf("failed to retrieve log entry %v", err)
