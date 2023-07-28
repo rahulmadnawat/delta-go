@@ -61,22 +61,22 @@ var (
 
 func init() {
 	flag.StringVar(&bucketName, "bucket", "vehicle-telemetry-rivian-dev", "The `name` of the S3 bucket to list objects from.")
-	flag.StringVar(&objectPrefix, "prefix", "tables/v1/vehicle_rivian/", "The optional `object prefix` of the S3 Object keys to list.")
-	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/rivian-dev-full-backfill-non-clone", "The `script directory` in which to keep script files.")
-	flag.StringVar(&inputPath, "input-path", "files_correct_schema.txt", "The `input path` from which to read script results.")
+	flag.StringVar(&objectPrefix, "prefix", "tables/v1/vehicle_rivian_delta_go_clone/", "The optional `object prefix` of the S3 Object keys to list.")
+	flag.StringVar(&scriptDir, "script-directory", "/Users/rahulmadnawat/delta-go-logs/rivian-dev-full-backfill-clone-v2", "The `script directory` in which to keep script files.")
+	flag.StringVar(&inputPath, "input-path", "files_result.txt", "The `input path` from which to read script results.")
 	flag.StringVar(&loggingPath, "logging-path", "logs_commit.txt", "The `logging path` to which to store script logs.")
 	flag.StringVar(&resultsPath, "results-path", "log_entry.txt", "The `results path` to which to store script results.")
 	flag.IntVar(&batchSize, "batch-size", 1000, "The `batch size` used to incrementally process untracked files.")
 	flag.IntVar(&minBatchNum, "min-batch-number", 1, "The `minimum batch number` to commit.")
 	flag.IntVar(&maxBatchNum, "max-batch-number", math.MaxInt64, "The `maximum batch number` to commit.")
-	flag.BoolVar(&dryRun, "dry-run", false, "To avoid committing transactions, enable `dry run`.")
+	flag.BoolVar(&dryRun, "dry-run", true, "To avoid committing transactions, enable `dry run`.")
 	flag.BoolVar(&writeLogEntries, "write-log-entries", true, "To save log entries on disk, enable `write log entries`.")
 	flag.IntVar(&numRetryAttempts, "num-retry-attemps", 5, "The `number of times to retry` reading a parquet file.")
 }
 
 func main() {
-	//CreateLogEntries([]string{})
-	CommitLogEntries()
+	CreateLogEntries([]string{})
+	//CommitLogEntries()
 }
 
 func GetPathsFromActions(actions []delta.Action) ([]string, []delta.Action) {
@@ -274,8 +274,13 @@ func CreateLogEntries(uncommittedFiles []string) [][]byte {
 				cb := pr.ColumnBuffers
 				newCb := map[string]*reader.ColumnBufferType{}
 				var sb strings.Builder
+				hasCorruptedTimestamps := false
 
 				for columnName, columnMetadata := range cb {
+					if strings.Split(columnName, "\x01")[0] == "Spark_schema" {
+						hasCorruptedTimestamps = true
+					}
+
 					columnPostfix := strings.Split(columnName, "\x01")[1]
 					newCb[columnPostfix] = columnMetadata
 					sb.WriteString(columnPostfix + " ")
@@ -306,54 +311,90 @@ func CreateLogEntries(uncommittedFiles []string) [][]byte {
 				var minValues map[string]any
 				var maxValues map[string]any
 
-				minCommitId, maxCommitId := string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue)
-				minDbcPath, maxDbcPath := string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue)
-				minId, maxId := string(newCb["Id"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Id"].ChunkHeader.MetaData.Statistics.MaxValue)
-				minSourcePath, maxSourcePath := string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MaxValue)
-				minSourceProcessedTimestamp, maxSourceProcessedTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
-				minSourceUploadedTimestamp, maxSourceUploadedTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
-				minSwVersion, maxSwVersion := string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue)
-				minTimestamp, maxTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
+				if hasCorruptedTimestamps {
+					minCommitId, maxCommitId := string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minDbcPath, maxDbcPath := string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minId, maxId := string(newCb["Id"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Id"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minSourcePath, maxSourcePath := string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minSwVersion, maxSwVersion := string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue)
 
-				for {
-					if newCb["Tcm_commit_id"].NextRowGroup() != nil &&
-						newCb["Dbc_path"].NextRowGroup() != nil &&
-						newCb["Id"].NextRowGroup() != nil &&
-						newCb["Source_path"].NextRowGroup() != nil &&
-						newCb["Source_processed_timestamp"].NextRowGroup() != nil &&
-						newCb["Source_uploaded_timestamp"].NextRowGroup() != nil &&
-						newCb["Tcm_sw_version"].NextRowGroup() != nil &&
-						newCb["Timestamp"].NextRowGroup() != nil {
-						break
+					for {
+						if newCb["Tcm_commit_id"].NextRowGroup() != nil &&
+							newCb["Dbc_path"].NextRowGroup() != nil &&
+							newCb["Id"].NextRowGroup() != nil &&
+							newCb["Source_path"].NextRowGroup() != nil &&
+							newCb["Tcm_sw_version"].NextRowGroup() != nil {
+							break
+						}
+
+						minCommitId, maxCommitId = min(minCommitId, string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxCommitId, string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minDbcPath, maxDbcPath = min(minDbcPath, string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxDbcPath, string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minId, maxId = min(minId, string(newCb["Id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxId, string(newCb["Id"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minSourcePath, maxSourcePath = min(minSourcePath, string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSourcePath, string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minSwVersion, maxSwVersion = min(minSwVersion, string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSwVersion, string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue))
 					}
 
-					minCommitId, maxCommitId = min(minCommitId, string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxCommitId, string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue))
-					minDbcPath, maxDbcPath = min(minDbcPath, string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxDbcPath, string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue))
-					minId, maxId = min(minId, string(newCb["Id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxId, string(newCb["Id"].ChunkHeader.MetaData.Statistics.MaxValue))
-					minSourcePath, maxSourcePath = min(minSourcePath, string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSourcePath, string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MaxValue))
-					minSourceProcessedTimestamp, maxSourceProcessedTimestamp = min(minSourceProcessedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxSourceProcessedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
-					minSourceUploadedTimestamp, maxSourceUploadedTimestamp = min(minSourceUploadedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxSourceUploadedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
-					minSwVersion, maxSwVersion = min(minSwVersion, string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSwVersion, string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue))
-					minTimestamp, maxTimestamp = min(minTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
+					minValues = map[string]any{"commit_id": minCommitId,
+						"dbc_path":    minDbcPath,
+						"id":          minId,
+						"source_path": minSourcePath,
+						"sw_version":  minSwVersion}
+
+					maxValues = map[string]any{"commit_id": maxCommitId,
+						"dbc_path":    maxDbcPath,
+						"id":          maxId,
+						"source_path": maxSourcePath,
+						"sw_version":  maxSwVersion}
+				} else {
+					minCommitId, maxCommitId := string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minDbcPath, maxDbcPath := string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minId, maxId := string(newCb["Id"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Id"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minSourcePath, maxSourcePath := string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minSourceProcessedTimestamp, maxSourceProcessedTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
+					minSourceUploadedTimestamp, maxSourceUploadedTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
+					minSwVersion, maxSwVersion := string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue), string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue)
+					minTimestamp, maxTimestamp := time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano), time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano)
+
+					for {
+						if newCb["Tcm_commit_id"].NextRowGroup() != nil &&
+							newCb["Dbc_path"].NextRowGroup() != nil &&
+							newCb["Id"].NextRowGroup() != nil &&
+							newCb["Source_path"].NextRowGroup() != nil &&
+							newCb["Source_processed_timestamp"].NextRowGroup() != nil &&
+							newCb["Source_uploaded_timestamp"].NextRowGroup() != nil &&
+							newCb["Tcm_sw_version"].NextRowGroup() != nil &&
+							newCb["Timestamp"].NextRowGroup() != nil {
+							break
+						}
+
+						minCommitId, maxCommitId = min(minCommitId, string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxCommitId, string(newCb["Tcm_commit_id"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minDbcPath, maxDbcPath = min(minDbcPath, string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxDbcPath, string(newCb["Dbc_path"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minId, maxId = min(minId, string(newCb["Id"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxId, string(newCb["Id"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minSourcePath, maxSourcePath = min(minSourcePath, string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSourcePath, string(newCb["Source_path"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minSourceProcessedTimestamp, maxSourceProcessedTimestamp = min(minSourceProcessedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxSourceProcessedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_processed_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
+						minSourceUploadedTimestamp, maxSourceUploadedTimestamp = min(minSourceUploadedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxSourceUploadedTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Source_uploaded_timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
+						minSwVersion, maxSwVersion = min(minSwVersion, string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MinValue)), max(maxSwVersion, string(newCb["Tcm_sw_version"].ChunkHeader.MetaData.Statistics.MaxValue))
+						minTimestamp, maxTimestamp = min(minTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Timestamp"].ChunkHeader.MetaData.Statistics.MinValue))).In(time.UTC).Format(time.RFC3339Nano)), max(maxTimestamp, time.UnixMicro(int64(binary.LittleEndian.Uint64(newCb["Timestamp"].ChunkHeader.MetaData.Statistics.MaxValue))).In(time.UTC).Format(time.RFC3339Nano))
+					}
+
+					minValues = map[string]any{"tcm_commit_id": minCommitId,
+						"dbc_path":                   minDbcPath,
+						"id":                         minId,
+						"source_path":                minSourcePath,
+						"source_processed_timestamp": minSourceProcessedTimestamp,
+						"source_uploaded_timestamp":  minSourceUploadedTimestamp,
+						"tcm_sw_version":             minSwVersion,
+						"timestamp":                  minTimestamp}
+
+					maxValues = map[string]any{"tcm_commit_id": maxCommitId,
+						"dbc_path":                   maxDbcPath,
+						"id":                         maxId,
+						"source_path":                maxSourcePath,
+						"source_processed_timestamp": maxSourceProcessedTimestamp,
+						"source_uploaded_timestamp":  maxSourceUploadedTimestamp,
+						"tcm_sw_version":             maxSwVersion,
+						"timestamp":                  maxTimestamp}
 				}
-
-				minValues = map[string]any{"tcm_commit_id": minCommitId,
-					"dbc_path":                   minDbcPath,
-					"id":                         minId,
-					"source_path":                minSourcePath,
-					"source_processed_timestamp": minSourceProcessedTimestamp,
-					"source_uploaded_timestamp":  minSourceUploadedTimestamp,
-					"tcm_sw_version":             minSwVersion,
-					"timestamp":                  minTimestamp}
-
-				maxValues = map[string]any{"tcm_commit_id": maxCommitId,
-					"dbc_path":                   maxDbcPath,
-					"id":                         maxId,
-					"source_path":                maxSourcePath,
-					"source_processed_timestamp": maxSourceProcessedTimestamp,
-					"source_uploaded_timestamp":  maxSourceUploadedTimestamp,
-					"tcm_sw_version":             maxSwVersion,
-					"timestamp":                  maxTimestamp}
 
 				stats := delta.Stats{NumRecords: pr.Footer.NumRows, TightBounds: true, MinValues: minValues, MaxValues: maxValues, NullCount: nil}
 
